@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -63,6 +64,30 @@ func copyPump(ctx context.Context, dst, src *websocket.Conn) error {
 	}
 }
 
+func pipeConns(a, b net.Conn) {
+	if a == nil || b == nil {
+		return
+	}
+
+	done := make(chan struct{}, 2)
+
+	go func() {
+		_, _ = io.Copy(a, b)
+		_ = a.Close()
+		_ = b.Close()
+		done <- struct{}{}
+	}()
+
+	go func() {
+		_, _ = io.Copy(b, a)
+		_ = a.Close()
+		_ = b.Close()
+		done <- struct{}{}
+	}()
+
+	<-done
+}
+
 func main() {
 	listenAddr := envOr("SATURN_BUILDER_LISTEN", "127.0.0.1:8787")
 	upstreamBase := envOr("SATURN_BUILDER_UPSTREAM", "wss://build.construct.net/")
@@ -98,6 +123,12 @@ func main() {
 		if p := r.Header.Get("Sec-WebSocket-Protocol"); p != "" {
 			headers.Set("Sec-WebSocket-Protocol", p)
 		}
+		if origin := r.Header.Get("Origin"); origin != "" {
+			headers.Set("Origin", origin)
+		}
+		if cookie := r.Header.Get("Cookie"); cookie != "" {
+			headers.Set("Cookie", cookie)
+		}
 		if ua := r.Header.Get("User-Agent"); ua != "" {
 			headers.Set("User-Agent", ua)
 		}
@@ -115,15 +146,9 @@ func main() {
 
 		log.Printf("[SaturnBuilderProxy] connected: %s -> %s", r.URL.String(), upURL)
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		errCh := make(chan error, 2)
-		go func() { errCh <- copyPump(ctx, upConn, clientConn) }()
-		go func() { errCh <- copyPump(ctx, clientConn, upConn) }()
-
-		_ = <-errCh
-		cancel()
+		// After both handshakes are complete, tunnel raw websocket frames.
+		// This preserves masking + control frames (ping/pong/close) end-to-end.
+		pipeConns(clientConn.UnderlyingConn(), upConn.UnderlyingConn())
 		_ = clientConn.Close()
 		_ = upConn.Close()
 	})
