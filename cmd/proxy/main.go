@@ -99,7 +99,7 @@ func main() {
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 
-	dialer := websocket.Dialer{
+	baseDialer := websocket.Dialer{
 		HandshakeTimeout: 20 * time.Second,
 		TLSClientConfig:  &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "build.construct.net"},
 		Proxy:            http.ProxyFromEnvironment,
@@ -112,6 +112,10 @@ func main() {
 			http.Error(w, "bad upstream", http.StatusBadGateway)
 			return
 		}
+
+		reqProto := r.Header.Get("Sec-WebSocket-Protocol")
+		reqExt := r.Header.Get("Sec-WebSocket-Extensions")
+		wantsCompression := strings.Contains(strings.ToLower(reqExt), "permessage-deflate")
 
 		headers := http.Header{}
 		if p := r.Header.Get("Sec-WebSocket-Protocol"); p != "" {
@@ -127,6 +131,9 @@ func main() {
 			headers.Set("User-Agent", ua)
 		}
 
+		dialer := baseDialer
+		dialer.EnableCompression = wantsCompression
+
 		upConn, resp, err := dialer.Dial(upURL, headers)
 		if err != nil {
 			status := ""
@@ -137,20 +144,35 @@ func main() {
 			return
 		}
 		selectedProto := upConn.Subprotocol()
+		selectedExt := ""
+		if resp != nil {
+			selectedExt = resp.Header.Get("Sec-WebSocket-Extensions")
+		}
 
 		respHeaders := http.Header{}
 		if selectedProto != "" {
 			respHeaders.Set("Sec-WebSocket-Protocol", selectedProto)
 		}
 
-		clientConn, err := u.Upgrade(w, r, respHeaders)
+		upgrader := u
+		upgrader.EnableCompression = wantsCompression
+
+		clientConn, err := upgrader.Upgrade(w, r, respHeaders)
 		if err != nil {
 			log.Printf("[SaturnBuilderProxy] client upgrade failed: %v", err)
 			_ = upConn.Close()
 			return
 		}
 
-		log.Printf("[SaturnBuilderProxy] connected: %s -> %s subprotocol=%q", r.URL.String(), upURL, selectedProto)
+		log.Printf(
+			"[SaturnBuilderProxy] connected: %s -> %s req_subprotocol=%q selected_subprotocol=%q req_ext=%q selected_ext=%q",
+			r.URL.String(),
+			upURL,
+			reqProto,
+			selectedProto,
+			reqExt,
+			selectedExt,
+		)
 
 		// After both handshakes are complete, tunnel raw websocket frames.
 		// This preserves masking + control frames (ping/pong/close) end-to-end.
