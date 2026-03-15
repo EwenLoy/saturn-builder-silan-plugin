@@ -72,14 +72,16 @@ func pipeConns(a, b net.Conn) {
 	done := make(chan struct{}, 2)
 
 	go func() {
-		_, _ = io.Copy(a, b)
+		n, err := io.Copy(a, b)
+		log.Printf("[SaturnBuilderProxy] tunnel b->a done bytes=%d err=%v", n, err)
 		_ = a.Close()
 		_ = b.Close()
 		done <- struct{}{}
 	}()
 
 	go func() {
-		_, _ = io.Copy(b, a)
+		n, err := io.Copy(b, a)
+		log.Printf("[SaturnBuilderProxy] tunnel a->b done bytes=%d err=%v", n, err)
 		_ = a.Close()
 		_ = b.Close()
 		done <- struct{}{}
@@ -116,6 +118,8 @@ func main() {
 		reqProto := r.Header.Get("Sec-WebSocket-Protocol")
 		reqExt := r.Header.Get("Sec-WebSocket-Extensions")
 		wantsCompression := strings.Contains(strings.ToLower(reqExt), "permessage-deflate")
+		cookiePresent := r.Header.Get("Cookie") != ""
+		originPresent := r.Header.Get("Origin") != ""
 
 		headers := http.Header{}
 		if p := r.Header.Get("Sec-WebSocket-Protocol"); p != "" {
@@ -148,6 +152,7 @@ func main() {
 		if resp != nil {
 			selectedExt = resp.Header.Get("Sec-WebSocket-Extensions")
 		}
+		upstreamCompression := strings.Contains(strings.ToLower(selectedExt), "permessage-deflate")
 
 		respHeaders := http.Header{}
 		if selectedProto != "" {
@@ -155,7 +160,9 @@ func main() {
 		}
 
 		upgrader := u
-		upgrader.EnableCompression = wantsCompression
+		// Important: for raw tunneling we must not negotiate different extensions
+		// on client vs upstream. Only enable compression if upstream also negotiated it.
+		upgrader.EnableCompression = upstreamCompression
 
 		clientConn, err := upgrader.Upgrade(w, r, respHeaders)
 		if err != nil {
@@ -165,13 +172,17 @@ func main() {
 		}
 
 		log.Printf(
-			"[SaturnBuilderProxy] connected: %s -> %s req_subprotocol=%q selected_subprotocol=%q req_ext=%q selected_ext=%q",
+			"[SaturnBuilderProxy] connected: %s -> %s req_subprotocol=%q selected_subprotocol=%q req_ext=%q selected_ext=%q wants_compression=%v upstream_compression=%v cookie=%v origin=%v",
 			r.URL.String(),
 			upURL,
 			reqProto,
 			selectedProto,
 			reqExt,
 			selectedExt,
+			wantsCompression,
+			upstreamCompression,
+			cookiePresent,
+			originPresent,
 		)
 
 		// After both handshakes are complete, tunnel raw websocket frames.
