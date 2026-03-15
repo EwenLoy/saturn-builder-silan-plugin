@@ -113,12 +113,6 @@ func main() {
 			return
 		}
 
-		clientConn, err := u.Upgrade(w, r, nil)
-		if err != nil {
-			log.Printf("[SaturnBuilderProxy] upgrade failed: %v", err)
-			return
-		}
-
 		headers := http.Header{}
 		if p := r.Header.Get("Sec-WebSocket-Protocol"); p != "" {
 			headers.Set("Sec-WebSocket-Protocol", p)
@@ -140,11 +134,23 @@ func main() {
 				status = resp.Status
 			}
 			log.Printf("[SaturnBuilderProxy] upstream dial failed: %v %s", err, status)
-			_ = clientConn.Close()
+			return
+		}
+		selectedProto := upConn.Subprotocol()
+
+		respHeaders := http.Header{}
+		if selectedProto != "" {
+			respHeaders.Set("Sec-WebSocket-Protocol", selectedProto)
+		}
+
+		clientConn, err := u.Upgrade(w, r, respHeaders)
+		if err != nil {
+			log.Printf("[SaturnBuilderProxy] client upgrade failed: %v", err)
+			_ = upConn.Close()
 			return
 		}
 
-		log.Printf("[SaturnBuilderProxy] connected: %s -> %s", r.URL.String(), upURL)
+		log.Printf("[SaturnBuilderProxy] connected: %s -> %s subprotocol=%q", r.URL.String(), upURL, selectedProto)
 
 		// After both handshakes are complete, tunnel raw websocket frames.
 		// This preserves masking + control frames (ping/pong/close) end-to-end.
